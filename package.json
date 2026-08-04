@@ -1,0 +1,18 @@
+{
+  "name": "pacifica-account-lookup",
+  "version": "1.0.0",
+  "description": "Remote MCP server for real-time Pacifica.fi account lookups by wallet address",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "express": "^5.2.1",
+    "zod": "^4.4.3"
+  },
+  "license": "MIT"
+}
