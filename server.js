@@ -6,11 +6,13 @@
  * Claude Desktop can all use it as a Custom Connector - not just one laptop.
  *
  * Tools:
- *  - pacifica_get_account            account balance/equity/margin/fees
- *  - pacifica_get_positions          open positions
- *  - pacifica_get_trade_history      trade history (incl. liquidation tags)
- *  - pacifica_get_mark_price_klines  mark-price candles (liquidation/SL trigger source)
- *  - pacifica_get_klines             trade-price candles (chart price, for comparison)
+ *  - pacifica_get_account              account balance/equity/margin/fees
+ *  - pacifica_get_positions            open positions
+ *  - pacifica_get_trade_history        trade history (incl. liquidation tags)
+ *  - pacifica_get_mark_price_klines    mark-price candles (liquidation/SL trigger source)
+ *  - pacifica_get_klines               trade-price candles (chart price, for comparison)
+ *  - pacifica_get_order_history_by_id  full order config by order_id (type, stop_price, trigger_price_type, reduce_only)
+ *  - pacifica_get_open_orders          currently open/pending orders (incl. untriggered stops), by account
  *
  * Read-only. Only calls Pacifica's public REST API. No API keys,
  * no private keys, nothing sensitive stored or required.
@@ -164,6 +166,46 @@ function buildServer() {
         let path = `/kline?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}&start_time=${startMs}`;
         if (endMs !== undefined) path += `&end_time=${endMs}`;
         const data = await fetchJson(path);
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: 'text', text: 'Error: ' + err.message }], isError: true };
+      }
+    }
+  );
+
+  server.registerTool(
+    'pacifica_get_order_history_by_id',
+    {
+      title: 'Get Pacifica order history by order ID',
+      description:
+        'Get the full lifecycle/configuration of a specific order by its order_id - including order_type (e.g. stop_loss_market, stop_loss_limit, take_profit_market, take_profit_limit, limit, market), stop_price, reduce_only, and trigger_price_type (mark_price, last_trade_price, or mid_price - this tells you what the order was ACTUALLY configured to trigger against). Use this after pacifica_get_trade_history to look up the order_id of a closed/filled trade and verify exactly how its SL/TP was configured - this is the only way to confirm trigger price and trigger price type, which trade history does not expose.',
+      inputSchema: {
+        order_id: z.union([z.number(), z.string()]).describe('The order_id to look up (found in pacifica_get_trade_history results)')
+      }
+    },
+    async ({ order_id }) => {
+      try {
+        const data = await fetchJson(`/orders/history_by_id?order_id=${encodeURIComponent(order_id)}`);
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: 'text', text: 'Error: ' + err.message }], isError: true };
+      }
+    }
+  );
+
+  server.registerTool(
+    'pacifica_get_open_orders',
+    {
+      title: 'Get Pacifica open orders',
+      description:
+        'Get all currently open/pending orders (including resting stop/TP/SL orders that have not yet triggered) for an account. Useful for tickets about an order that "should have filled" or "disappeared" - shows whether it is still resting, and its configured type/stop_price/trigger_price_type. For ALREADY-closed/filled/cancelled orders use pacifica_get_order_history_by_id instead.',
+      inputSchema: {
+        address: z.string().describe('The Solana wallet address of the Pacifica account')
+      }
+    },
+    async ({ address }) => {
+      try {
+        const data = await fetchJson(`/orders?account=${encodeURIComponent(address)}`);
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: 'Error: ' + err.message }], isError: true };
