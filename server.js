@@ -2,9 +2,15 @@
 
 /**
  * Pacifica Account Lookup - remote (HTTP-hosted) MCP server.
- * Same tools as the local version, but reachable over the public
- * internet so Claude Mobile, claude.ai, and Claude Desktop can all
- * use it as a Custom Connector - not just one laptop.
+ * Reachable over the public internet so Claude Mobile, claude.ai, and
+ * Claude Desktop can all use it as a Custom Connector - not just one laptop.
+ *
+ * Tools:
+ *  - pacifica_get_account            account balance/equity/margin/fees
+ *  - pacifica_get_positions          open positions
+ *  - pacifica_get_trade_history      trade history (incl. liquidation tags)
+ *  - pacifica_get_mark_price_klines  mark-price candles (liquidation/SL trigger source)
+ *  - pacifica_get_klines             trade-price candles (chart price, for comparison)
  *
  * Read-only. Only calls Pacifica's public REST API. No API keys,
  * no private keys, nothing sensitive stored or required.
@@ -35,6 +41,22 @@ function fetchJson(path) {
       .on('error', reject);
   });
 }
+
+// Accepts either a millisecond epoch (number or numeric string) or an
+// ISO-8601 date string like "2026-08-12T12:30:00Z" and returns ms epoch.
+function parseTimeToMs(value) {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value === 'number') return Math.trunc(value);
+  const trimmed = String(value).trim();
+  if (/^\d+$/.test(trimmed)) return parseInt(trimmed, 10);
+  const parsed = Date.parse(trimmed);
+  if (Number.isNaN(parsed)) {
+    throw new Error(`Could not parse time value "${value}". Use a millisecond epoch or an ISO-8601 string (e.g. "2026-08-12T12:30:00Z").`);
+  }
+  return parsed;
+}
+
+const KLINE_INTERVALS = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '8h', '12h', '1d'];
 
 function buildServer() {
   const server = new McpServer({ name: 'pacifica-account-lookup', version: '1.0.0' });
@@ -88,6 +110,60 @@ function buildServer() {
     async ({ address, limit }) => {
       try {
         const data = await fetchJson(`/trades/history?account=${encodeURIComponent(address)}&limit=${limit || 20}`);
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: 'text', text: 'Error: ' + err.message }], isError: true };
+      }
+    }
+  );
+
+  server.registerTool(
+    'pacifica_get_mark_price_klines',
+    {
+      title: 'Get Pacifica mark price candles',
+      description:
+        'Get historical MARK PRICE candles for a market and time window (1-minute granularity available). Mark price - not last-traded price - is what actually triggers liquidations and stop-loss/take-profit orders on Pacifica, so this is the authoritative source for "did the mark price really reach this level at this time" investigations. Use this to independently verify a suspected early/late SL or liquidation trigger. Times may be given as millisecond epochs or ISO-8601 strings (e.g. "2026-08-12T12:30:00Z").',
+      inputSchema: {
+        symbol: z.string().describe('Market symbol, e.g. BTC, EURUSD'),
+        interval: z.enum(KLINE_INTERVALS).describe('Candle interval. Use 1m for precise trigger-time investigation.'),
+        start_time: z.union([z.number(), z.string()]).describe('Start of window: ms epoch or ISO-8601 string'),
+        end_time: z.union([z.number(), z.string()]).optional().describe('End of window: ms epoch or ISO-8601 string (defaults to now)')
+      }
+    },
+    async ({ symbol, interval, start_time, end_time }) => {
+      try {
+        const startMs = parseTimeToMs(start_time);
+        const endMs = parseTimeToMs(end_time);
+        let path = `/kline/mark?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}&start_time=${startMs}`;
+        if (endMs !== undefined) path += `&end_time=${endMs}`;
+        const data = await fetchJson(path);
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: 'text', text: 'Error: ' + err.message }], isError: true };
+      }
+    }
+  );
+
+  server.registerTool(
+    'pacifica_get_klines',
+    {
+      title: 'Get Pacifica trade-price candles',
+      description:
+        'Get historical candles based on LAST TRADED PRICE (not mark price) for a market and time window. Useful for comparing against pacifica_get_mark_price_klines to explain discrepancies between what the chart showed and what actually triggered a liquidation/SL - chart candles are trade price, triggers use mark price. Times may be given as millisecond epochs or ISO-8601 strings.',
+      inputSchema: {
+        symbol: z.string().describe('Market symbol, e.g. BTC, EURUSD'),
+        interval: z.enum(KLINE_INTERVALS).describe('Candle interval. Use 1m for precise trigger-time investigation.'),
+        start_time: z.union([z.number(), z.string()]).describe('Start of window: ms epoch or ISO-8601 string'),
+        end_time: z.union([z.number(), z.string()]).optional().describe('End of window: ms epoch or ISO-8601 string (defaults to now)')
+      }
+    },
+    async ({ symbol, interval, start_time, end_time }) => {
+      try {
+        const startMs = parseTimeToMs(start_time);
+        const endMs = parseTimeToMs(end_time);
+        let path = `/kline?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}&start_time=${startMs}`;
+        if (endMs !== undefined) path += `&end_time=${endMs}`;
+        const data = await fetchJson(path);
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: 'Error: ' + err.message }], isError: true };
