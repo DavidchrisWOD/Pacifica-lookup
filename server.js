@@ -13,6 +13,7 @@
  *  - pacifica_get_klines               trade-price candles (chart price, for comparison)
  *  - pacifica_get_order_history_by_id  full order config by order_id (type, stop_price, trigger_price_type, reduce_only)
  *  - pacifica_get_open_orders          currently open/pending orders (incl. untriggered stops), by account
+ *  - pacifica_get_market_info           per-market max_leverage/tick/lot size + funding; derive MMR = 1/(2*max_leverage)
  *
  * Read-only. Only calls Pacifica's public REST API. No API keys,
  * no private keys, nothing sensitive stored or required.
@@ -206,6 +207,24 @@ function buildServer() {
     async ({ address }) => {
       try {
         const data = await fetchJson(`/orders?account=${encodeURIComponent(address)}`);
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: 'text', text: 'Error: ' + err.message }], isError: true };
+      }
+    }
+  );
+
+  server.registerTool(
+    'pacifica_get_market_info',
+    {
+      title: 'Get Pacifica market info (leverage, tick/lot size, MMR)',
+      description:
+        'Get per-market trading parameters for every Pacifica market: max_leverage, tick_size, lot_size, min/max order size, and current/next funding rate. Critically, this is what you need to independently verify liquidation math: on Pacifica, maintenance margin is ALWAYS exactly half the initial margin, and initial margin = 1 / max_leverage. So the maintenance margin ratio (MMR) for any market = 1 / (2 * max_leverage) - e.g. max_leverage 50 -> MMR = 1%. Combine with mark price (pacifica_get_mark_price_klines) and Pacifica\'s published formula liquidation_price = [price - (side * position_margin) / position_size] / (1 - side / max_leverage / 2) (side = 1 for long, -1 for short; position_margin = account equity for cross-margin) to check a liquidation price precisely instead of guessing at an MMR number.',
+      inputSchema: {}
+    },
+    async () => {
+      try {
+        const data = await fetchJson('/info');
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: 'Error: ' + err.message }], isError: true };
