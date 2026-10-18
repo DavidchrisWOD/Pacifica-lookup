@@ -6,13 +6,14 @@
   "scripts": {
     "start": "node server.js"
   },
-  "engines": {
-    "node": ">=18"
-  },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
-    "express": "^5.2.1",
-    "zod": "^4.4.3"
-  },
-  "license": "MIT"
+ "engines": {
+  "node": ">=18"
+},
+"dependencies": {
+  "@modelcontextprotocol/sdk": "^1.30.0",
+  "express": "^5.2.1",
+  "express-oauth2-jwt-bearer": "^1.11.0",
+  "zod": "^4.4.3"
+},
+"license": "MIT"
 }
