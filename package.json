@@ -12,7 +12,7 @@
 "dependencies": {
   "@modelcontextprotocol/sdk": "^1.30.0",
   "express": "^5.2.1",
-  "express-oauth2-jwt-bearer": "^1.11.0",
+  "express-oauth2-jwt-bearer": "^1.10.0",
   "zod": "^4.4.3"
 },
 "license": "MIT"
