@@ -45,7 +45,7 @@ const https = require('https');
 const { z } = require('zod');
 const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
 const { StreamableHTTPServerTransport } = require('@modelcontextprotocol/sdk/server/streamableHttp.js');
-
+const { auth } = require('express-oauth2-jwt-bearer');
 const BASE_URL = 'https://api.pacifica.fi/api/v1';
 
 function fetchJson(path) {
