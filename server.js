@@ -28,7 +28,10 @@
  *   pacifica_get_pending_withdrawals, pacifica_get_payout_history
  * Tools - orders:
  *   pacifica_get_open_orders, pacifica_get_order_history,
- *   pacifica_get_order_history_by_id, pacifica_get_twap_orders
+ *   pacifica_get_order_history_by_id,
+ *   pacifica_get_twap_orders (open/history/by_id = TWAP orders; records_open/records_history = TWAP orders + strategies),
+ *   pacifica_get_order_strategies (OCO / conditional / trailing stop / chase / swarm / TWAP strategies),
+ *   pacifica_get_order_history_records (orders + finished strategies in one list)
  * Tools - spot:
  *   pacifica_get_spot_balance_history, pacifica_get_spot_deposit_history,
  *   pacifica_get_spot_withdraw_history, pacifica_get_spot_withdraw_pending
@@ -226,6 +229,71 @@ async function apiGetPaged(path, query, { maxPages = 1, startMs, endMs, timeFiel
     out.has_more = true;
     out.next_cursor = lastJson.next_cursor;
   }
+  if (rate) out.rate_limit = rate;
+  return out;
+}
+
+/**
+ * Cursor paging for endpoints whose list lives INSIDE data (data.records,
+ * data.next_cursor, data.has_more) - e.g. GET /twaps and /twaps/history.
+ * apiGetPaged() above only understands a top-level data ARRAY, so it would
+ * silently hand back just page 1 for these endpoints.
+ * One page (maxPages <= 1) is returned raw and unchanged; several pages are
+ * merged into the same shape (data.records) plus pages_fetched/stopped_because.
+ */
+async function apiGetNestedPaged(path, query, { maxPages = 1 } = {}) {
+  if (maxPages <= 1) {
+    return (await apiGet(path, query)).json;
+  }
+
+  const records = [];
+  let cursor = query.cursor;
+  let pages = 0;
+  let lastData = null;
+  let rate = null;
+  let stop = null;
+
+  while (pages < maxPages) {
+    let r;
+    try {
+      r = await apiGet(path, { ...query, cursor });
+    } catch (e) {
+      if (e.status === 429 && pages > 0) {
+        stop = 'rate_limited';
+        rate = e.rate || rate;
+        break;
+      }
+      throw e;
+    }
+    rate = r.rate || rate;
+    const d = r.json && r.json.data;
+    if (!r.json || r.json.success === false || !d || !Array.isArray(d.records)) {
+      if (pages === 0) return r.json; // error or unexpected payload: hand it back untouched
+      stop = 'unexpected_response';
+      break;
+    }
+    pages++;
+    lastData = d;
+    records.push(...d.records);
+
+    if (!d.has_more || !d.next_cursor) {
+      cursor = null;
+      break;
+    }
+    cursor = d.next_cursor;
+    if (rate && rate.remaining_credits < 20 && pages < maxPages) {
+      stop = 'low_rate_limit_credits';
+      break;
+    }
+  }
+
+  const moreAvailable = !!(lastData && lastData.has_more && lastData.next_cursor);
+  const out = {
+    success: true,
+    data: { records, has_more: moreAvailable, next_cursor: moreAvailable ? lastData.next_cursor : null },
+    pages_fetched: pages,
+    stopped_because: stop || (moreAvailable ? 'max_pages_reached' : 'end_of_data')
+  };
   if (rate) out.rate_limit = rate;
   return out;
 }
@@ -556,10 +624,13 @@ function registerTools(server) {
   simple(
     'pacifica_get_account',
     'Get Pacifica account info',
-    'Get balance, equity, fee level, margin used, cross MMR, available-to-spend/withdraw, pending balance, order counts and spot balances for ANY Pacifica account by wallet address. Use this first when investigating a ticket about a specific wallet.',
+    'Get balance, equity, fee level, margin used, cross MMR, available-to-spend/withdraw, pending balance, order counts and spot balances for ANY Pacifica account by wallet address. Use this first when investigating a ticket about a specific wallet. Optional full=true also returns print_order_equity (equity locked in open Print orders) and total_account_equity (= account_equity + print_order_equity); plain account_equity does NOT include Print-locked equity, so use full=true when a Print user\'s equity looks lower than expected. If full=true returns HTTP 503 / error_id "full_components_unavailable", the equity components are not ready yet - retry without full.',
     '/account',
-    { address: addr() },
-    (a) => ({ account: a.address })
+    {
+      address: addr(),
+      full: z.boolean().optional().describe('true = also include print_order_equity and total_account_equity (default false)')
+    },
+    (a) => ({ account: a.address, full: a.full === true ? 'true' : undefined })
   );
 
   simple(
@@ -771,10 +842,10 @@ function registerTools(server) {
     name: 'pacifica_get_twap_orders',
     title: 'Get Pacifica TWAP orders',
     description:
-      'TWAP order lookups for an account. view="open" = currently running TWAP orders; view="history" = summarized TWAP order history (paged); view="by_id" = full per-event history of one TWAP order (needs order_id).' +
+      'TWAP lookups for an account. Pacifica has TWO kinds of TWAP: classic TWAP ORDERS and TWAP order STRATEGIES. The first three views cover TWAP ORDERS ONLY and MISS TWAP strategies: view="open" = currently running TWAP orders; view="history" = summarized TWAP order history (paged); view="by_id" = full per-event history of one TWAP order (needs order_id). The two records views merge BOTH kinds into one newest-first list - prefer them when you do not know which kind the customer used, and use them before telling anyone "no TWAP found": view="records_open" = TWAPs still running (status pending/active/running/paused); view="records_history" = finished TWAPs (status completed/cancelled/expired/failed, with terminal_reason such as user_cancel, boundary_cancel, insufficient_balance, rejected). Each record has identity.kind "order" (identity.order_id) or "strategy" (identity.strategy_id: chain into pacifica_get_order_strategies view="timeline" for its events), plus symbol, side, initial_amount, filled_amount, average_fill_price, duration_seconds, number_of_clips (slices planned), placed_clip_count (slices processed so far), slippage_percent, price_limit. Per Pacifica docs, only TWAP orders created through the API are listed in the records views and a new TWAP can take a moment to appear, so an empty list is not proof that nothing was placed. Cursors are not interchangeable between views; records views take limit 1-500.' +
       PAGING_NOTE,
     shape: {
-      view: z.enum(['open', 'history', 'by_id']).describe('open | history | by_id'),
+      view: z.enum(['open', 'history', 'by_id', 'records_open', 'records_history']).describe('open | history | by_id (TWAP orders only)  or  records_open | records_history (TWAP orders AND TWAP strategies merged)'),
       address: addr(false),
       order_id: z.number().int().min(0).optional().describe('Required for view="by_id"'),
       limit: limitArg(4000),
@@ -788,8 +859,64 @@ function registerTools(server) {
       }
       if (!a.address) throw new Error('address is required for this view.');
       if (a.view === 'open') return (await apiGet('/orders/twap', { account: a.address })).json;
+      if (a.view === 'records_open' || a.view === 'records_history') {
+        if (a.limit !== undefined && a.limit > 500) throw new Error('limit must be 1-500 for the records views.');
+        return apiGetNestedPaged(
+          a.view === 'records_open' ? '/twaps' : '/twaps/history',
+          { account: a.address, limit: a.limit, cursor: a.cursor },
+          { maxPages: a.max_pages || 1 }
+        );
+      }
       return apiGetPaged('/orders/twap/history', { account: a.address, limit: a.limit, cursor: a.cursor }, { maxPages: a.max_pages || 1 });
     }
+  });
+
+  const STRATEGY_TYPES = ['oco', 'conditional', 'trailing_stop', 'auto_chase', 'swarm', 'trigger_swarm', 'twap'];
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  def({
+    name: 'pacifica_get_order_strategies',
+    title: 'Get Pacifica order strategies (OCO / conditional / trailing stop / chase / swarm / TWAP strategy)',
+    description:
+      'Server-side ORDER STRATEGIES on an account: rules Pacifica runs for the user, such as oco, conditional, trailing_stop, auto_chase (Chase), swarm, trigger_swarm and twap strategies. Views: "open" = strategies not finished yet (lifecycle pending / open / paused); "history" = finished strategies (completed / cancelled / expired / failed); "by_id" = one strategy in full: definition.params as the user set them, state, terminal_reason and owned_orders (needs strategy_id); "timeline" = oldest-first events of one strategy: lifecycle changes, the orders it placed and their trades (needs strategy_id). Key fields: lifecycle; phase (armed = waiting for its trigger, running = trading); terminal_reason (for example user_cancel, boundary_cancel, insufficient_balance: the direct answer to "why did my strategy stop / cancel?"); owned_orders -> order_ids you can chain into pacifica_get_order_history_by_id (orders a strategy places carry its strategy_id as parent_id). Timeline lifecycle values are more detailed than the strategy lifecycle (adds active, running, trigger_failed). Optional type filters open/history to one strategy type. open/history page by offset (not by cursor): while has_more is true, call again with offset = offset + limit. A 404 on by_id/timeline means the strategy does not exist OR belongs to a different account. Use this when a ticket mentions OCO, conditional, trailing stop, chase, swarm or a TWAP that is missing from the classic order views.',
+    shape: {
+      view: z.enum(['open', 'history', 'by_id', 'timeline']).describe('open | history | by_id | timeline'),
+      address: addr(),
+      strategy_id: z.string().optional().describe('Strategy UUID. Required for view="by_id" and view="timeline"'),
+      type: z.enum(STRATEGY_TYPES).optional().describe('open/history only: return only this strategy type'),
+      limit: z.number().int().min(1).max(500).optional().describe('open/history only: max strategies per request (1-500, default 100)'),
+      offset: z.number().int().min(0).optional().describe('open/history only: number of strategies to skip (default 0)')
+    },
+    run: async (a) => {
+      if (a.view === 'by_id' || a.view === 'timeline') {
+        if (!a.strategy_id) throw new Error(`strategy_id is required for view="${a.view}".`);
+        const id = String(a.strategy_id).trim();
+        if (!UUID_RE.test(id)) {
+          throw new Error(
+            'strategy_id must be a UUID such as 0f8e7c2a-4b1d-4e5f-9a3b-2c1d0e9f8a7b. Get strategy_ids from this tool (view="open" or "history") or from TWAP records with identity.kind="strategy".'
+          );
+        }
+        const path = `/order_strategies/${encodeURIComponent(id)}` + (a.view === 'timeline' ? '/timeline' : '');
+        return (await apiGet(path, { account: a.address })).json;
+      }
+      const path = a.view === 'open' ? '/order_strategies' : '/order_strategies/history';
+      return (await apiGet(path, { account: a.address, type: a.type, limit: a.limit, offset: a.offset })).json;
+    }
+  });
+
+  def({
+    name: 'pacifica_get_order_history_records',
+    title: 'Get Pacifica order history records (orders + finished strategies)',
+    description:
+      'One combined list, newest first by creation time, of an account\'s orders AND its finished order strategies. Each item is {kind: "order" | "strategy", record}. Order records show each order once, in its latest state (order_id, symbol, side, initial_price, average_filled_price, amount, filled_amount, order_status, order_type, reduce_only, reason, created_at, updated_at). Strategy records are finished strategies (strategy_id, strategy_type, lifecycle, terminal_reason, owned_orders). Differences from pacifica_get_order_history: it includes FINISHED strategies (open strategies are not included - use pacifica_get_order_strategies view="open"); it leaves out the orders a strategy placed (find them in the strategy record\'s owned_orders; parent_id is always null here); it sorts by creation time instead of order ID; and its cursors do NOT work with pacifica_get_order_history. limit is 1-100 (default and max 100). Good first look when you want everything the customer did in one timeline.' +
+      PAGING_NOTE,
+    shape: {
+      address: addr(),
+      limit: limitArg(100),
+      cursor: cursorArg,
+      max_pages: maxPagesArg
+    },
+    run: async (a) => apiGetPaged('/orders/history/records', { account: a.address, limit: a.limit, cursor: a.cursor }, { maxPages: a.max_pages || 1 })
   });
 
   /* ---------------- Spot ---------------- */
@@ -1093,7 +1220,7 @@ function registerTools(server) {
 }
 
 function buildServer() {
-  const server = new McpServer({ name: 'pacifica-account-lookup', version: '2.0.0' });
+  const server = new McpServer({ name: 'pacifica-account-lookup', version: '2.1.0' });
   registerTools(server);
   return server;
 }
